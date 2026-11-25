@@ -1,0 +1,8 @@
+{
+  "name": "Monitoreo Wifi - EMUI",
+  "description": "Dashboard de monitoreo de Access Points Cisco Meraki del EMUI (Gobierno de la Ciudad de Buenos Aires) con verificación por ping cada 30 segundos y detección de latencia.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
