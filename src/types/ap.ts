@@ -12,6 +12,13 @@ export interface PingRecord {
   source?: 'server' | 'agent';
 }
 
+export interface OutageEvent {
+  startedAt: string;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  source: 'server' | 'agent';
+}
+
 export interface AccessPoint {
   id: string;
   model: string;
@@ -30,6 +37,15 @@ export interface AccessPoint {
   speedMbps: number | null;
   uploadMbps: number | null;
   speedCheckedAt: string | null;
+  totalChecks: number;
+  successfulChecks: number;
+  uptimePercent: number | null;
+  outageCount: number;
+  offlineSince: string | null;
+  activeOutageStartedAt: string | null;
+  lastOutageAt: string | null;
+  lastOutageDurationSec: number | null;
+  outages: OutageEvent[];
   detail: string;
   history: PingRecord[];
 }
@@ -83,6 +99,7 @@ export type SortColumn =
   | 'portId'
   | 'latencyMs'
   | 'speedMbps'
+  | 'uptimePercent'
   | 'status';
 
 export type SortDirection = 'asc' | 'desc';
@@ -100,21 +117,20 @@ export interface ColumnFilters {
   portId: string;
   latency: 'all' | 'optimal' | 'high' | 'none';
   speed: 'all' | 'measured' | 'unmeasured';
+  uptime: 'all' | 'healthy' | 'degraded' | 'withOutages';
   status: ApStatus | 'all';
 }
 
-export interface EmailAlertConfig {
-  recipientEmail: string;
-  autoEnabled: boolean;
-  cooldownMinutes: number;
+export interface AlertChannelsStatus {
+  whatsappConfigured: boolean;
+  telegramConfigured: boolean;
 }
 
-export interface EmailAlertLogEntry {
+export interface AlertLogEntry {
   id: string;
   timestamp: string;
   kind: 'auto' | 'test';
-  recipient: string;
-  subject: string;
+  channel: string;
   apSummary: string;
   success: boolean;
   message: string;
@@ -126,3 +142,12 @@ export interface ScheduleWindowStatus {
   timeLabel: string;
   reason: string;
 }
+
+export interface AlertMonitorState {
+  autoEnabled: boolean;
+  cooldownMinutes: number;
+  channels: AlertChannelsStatus;
+  scheduleStatus: ScheduleWindowStatus;
+  logs: AlertLogEntry[];
+}
+

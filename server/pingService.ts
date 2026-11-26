@@ -5,6 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { alertService } from './alertService.ts';
 import type {
   AccessPoint,
   AgentPingItem,
@@ -20,7 +21,8 @@ const execFileAsync = promisify(execFile);
 export const PING_INTERVAL_MS = 30 * 1000; // 30 segundos
 export const PING_INTERVAL_SECONDS = 30;
 const AGENT_FRESHNESS_MS = 90 * 1000; // 90s de vigencia del agente LAN
-const MAX_HISTORY_PER_AP = 60; // Últimos 30 minutos (60 ciclos de 30s)
+const MAX_HISTORY_PER_AP = 120; // Última hora (120 ciclos de 30s)
+const MAX_OUTAGES_PER_AP = 30;
 const STATE_DIR = path.resolve(process.cwd(), 'data');
 const STATE_FILE = path.join(STATE_DIR, 'monitor-state.json');
 
@@ -127,6 +129,15 @@ function createInitialAp(seed: PersistedSeed): AccessPoint {
     speedMbps: null,
     uploadMbps: null,
     speedCheckedAt: null,
+    totalChecks: 0,
+    successfulChecks: 0,
+    uptimePercent: null,
+    outageCount: 0,
+    offlineSince: null,
+    activeOutageStartedAt: null,
+    lastOutageAt: null,
+    lastOutageDurationSec: null,
+    outages: [],
     detail: 'Pendiente de verificación',
     history: [],
   };
@@ -200,6 +211,26 @@ class PingMonitorService {
             speedMbps: typeof ap.speedMbps === 'number' ? ap.speedMbps : null,
             uploadMbps: typeof ap.uploadMbps === 'number' ? ap.uploadMbps : null,
             speedCheckedAt: typeof ap.speedCheckedAt === 'string' ? ap.speedCheckedAt : null,
+            totalChecks: typeof ap.totalChecks === 'number' ? ap.totalChecks : 0,
+            successfulChecks: typeof ap.successfulChecks === 'number' ? ap.successfulChecks : 0,
+            uptimePercent: typeof ap.uptimePercent === 'number' ? ap.uptimePercent : null,
+            outageCount: typeof ap.outageCount === 'number' ? ap.outageCount : 0,
+            offlineSince:
+              typeof ap.offlineSince === 'string'
+                ? ap.offlineSince
+                : ap.status === 'offline'
+                  ? (typeof ap.activeOutageStartedAt === 'string'
+                      ? ap.activeOutageStartedAt
+                      : typeof ap.lastCheckedAt === 'string'
+                        ? ap.lastCheckedAt
+                        : null)
+                  : null,
+            activeOutageStartedAt:
+              typeof ap.activeOutageStartedAt === 'string' ? ap.activeOutageStartedAt : null,
+            lastOutageAt: typeof ap.lastOutageAt === 'string' ? ap.lastOutageAt : null,
+            lastOutageDurationSec:
+              typeof ap.lastOutageDurationSec === 'number' ? ap.lastOutageDurationSec : null,
+            outages: Array.isArray(ap.outages) ? ap.outages.slice(0, MAX_OUTAGES_PER_AP) : [],
           }));
         }
         if (typeof parsed.lastCycleAt === 'string' || parsed.lastCycleAt === null) {
@@ -580,6 +611,68 @@ class PingMonitorService {
   private applyPingRecord(ap: AccessPoint, record: PingRecord): AccessPoint {
     const history = [record, ...ap.history].slice(0, MAX_HISTORY_PER_AP);
     const isReachable = record.status === 'online' || record.status === 'slow';
+    const isCloudBlockedPrivate =
+      this.isCloudHost &&
+      record.source !== 'agent' &&
+      isPrivateIp(ap.ip) &&
+      record.status === 'offline';
+
+    let totalChecks = ap.totalChecks ?? 0;
+    let successfulChecks = ap.successfulChecks ?? 0;
+    let uptimePercent = ap.uptimePercent ?? null;
+    let outageCount = ap.outageCount ?? 0;
+    let activeOutageStartedAt = ap.activeOutageStartedAt ?? null;
+    let lastOutageAt = ap.lastOutageAt ?? null;
+    let lastOutageDurationSec = ap.lastOutageDurationSec ?? null;
+    let outages = Array.isArray(ap.outages) ? [...ap.outages] : [];
+
+    if (!isCloudBlockedPrivate) {
+      totalChecks += 1;
+      if (isReachable) {
+        successfulChecks += 1;
+      }
+      uptimePercent = Math.round((successfulChecks / totalChecks) * 1000) / 10;
+
+      if (!isReachable) {
+        if (!activeOutageStartedAt) {
+          activeOutageStartedAt = record.timestamp;
+          outageCount += 1;
+          lastOutageAt = record.timestamp;
+          outages = [
+            {
+              startedAt: record.timestamp,
+              endedAt: null,
+              durationSeconds: null,
+              source: record.source ?? 'server',
+            },
+            ...outages,
+          ].slice(0, MAX_OUTAGES_PER_AP);
+        }
+      } else if (activeOutageStartedAt) {
+        const durationSeconds = Math.max(
+          1,
+          Math.round(
+            (new Date(record.timestamp).getTime() -
+              new Date(activeOutageStartedAt).getTime()) /
+              1000,
+          ),
+        );
+        lastOutageDurationSec = durationSeconds;
+        if (outages.length > 0 && outages[0].endedAt === null) {
+          outages[0] = {
+            ...outages[0],
+            endedAt: record.timestamp,
+            durationSeconds,
+          };
+        }
+        activeOutageStartedAt = null;
+      }
+    }
+
+    const offlineSince = isReachable
+      ? null
+      : activeOutageStartedAt ?? ap.offlineSince ?? record.timestamp;
+
     return {
       ...ap,
       status: record.status,
@@ -590,6 +683,15 @@ class PingMonitorService {
       packetLoss: record.packetLoss,
       lastCheckedAt: record.timestamp,
       lastOnlineAt: isReachable ? record.timestamp : ap.lastOnlineAt,
+      totalChecks,
+      successfulChecks,
+      uptimePercent,
+      outageCount,
+      offlineSince,
+      activeOutageStartedAt,
+      lastOutageAt,
+      lastOutageDurationSec,
+      outages,
       detail: record.detail,
       history,
     };
@@ -600,10 +702,12 @@ class PingMonitorService {
       return this.getSnapshot();
     }
 
-    // Si hay un Agente Local EMUI reportando recientemente desde la LAN y el servidor está en la nube,
-    // no pisamos sus lecturas reales con timeouts externos salvo que se fuerce manualmente.
-    if (!forceServer && this.isCloudHost && this.isAgentActive()) {
-      this.scheduleNextInterval();
+    // Si hay un Agente Local EMUI activo desde la LAN y el servidor está en la nube,
+    // nunca pisamos sus lecturas reales con timeouts externos del servidor cloud.
+    if (this.isCloudHost && this.isAgentActive()) {
+      if (forceServer) {
+        this.scheduleNextInterval();
+      }
       return this.getSnapshot();
     }
 
@@ -619,7 +723,9 @@ class PingMonitorService {
       this.lastCycleAt = new Date().toISOString();
       this.scheduleNextInterval();
       this.saveState();
-      return this.getSnapshot();
+      const snapshot = this.getSnapshot();
+      void alertService.evaluateSnapshot(snapshot);
+      return snapshot;
     } finally {
       this.isScanning = false;
     }
@@ -690,7 +796,9 @@ class PingMonitorService {
     this.lastCycleAt = now;
     this.scheduleNextInterval();
     this.saveState();
-    return this.getSnapshot();
+    const snapshot = this.getSnapshot();
+    void alertService.evaluateSnapshot(snapshot);
+    return snapshot;
   }
 
   public async pingOne(id: string): Promise<{ ap: AccessPoint; snapshot: MonitorSnapshot } | null> {
@@ -698,6 +806,13 @@ class PingMonitorService {
     if (index === -1) return null;
 
     const target = this.aps[index];
+    if (this.isCloudHost && isPrivateIp(target.ip) && this.isAgentActive()) {
+      return {
+        ap: target,
+        snapshot: this.getSnapshot(),
+      };
+    }
+
     const record = await this.executePing(target.ip);
     const updated = this.applyPingRecord(target, record);
     this.aps[index] = updated;
@@ -832,6 +947,24 @@ class PingMonitorService {
       ap: updated,
       snapshot: this.getSnapshot(),
     };
+  }
+
+  public resetUptimeStats(): MonitorSnapshot {
+    this.aps = this.aps.map((ap) => ({
+      ...ap,
+      totalChecks: 0,
+      successfulChecks: 0,
+      uptimePercent: null,
+      outageCount: 0,
+      offlineSince: ap.status === 'offline' ? new Date().toISOString() : null,
+      activeOutageStartedAt: null,
+      lastOutageAt: null,
+      lastOutageDurationSec: null,
+      outages: [],
+      history: [],
+    }));
+    this.saveState();
+    return this.getSnapshot();
   }
 }
 

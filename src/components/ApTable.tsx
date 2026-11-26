@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDown,
@@ -19,6 +19,7 @@ import type {
   SortColumn,
   SortConfig,
 } from '../types/ap';
+import { formatElapsedSince, formatSinceCompact } from '../utils/duration';
 import { MerakiModelThumb } from './MerakiModelThumb';
 
 interface ApTableProps {
@@ -58,6 +59,17 @@ export function ApTable({
   onClearFilters,
 }: ApTableProps) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  const hasOffline = aps.some((ap) => ap.status === 'offline');
+  useEffect(() => {
+    if (!hasOffline) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [hasOffline]);
 
   const handleCopyIp = async (id: string, ip: string) => {
     try {
@@ -121,11 +133,24 @@ export function ApTable({
       );
     }
 
+    const sinceIso = ap.activeOutageStartedAt ?? ap.offlineSince ?? ap.lastCheckedAt;
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-bold text-[#C0392B] whitespace-nowrap">
-        <XCircle className="w-4 h-4 text-[#E74C3C] shrink-0" />
-        Fuera de Línea
-      </span>
+      <div className="flex flex-col gap-0.5">
+        <span className="inline-flex items-center gap-1.5 text-xs font-bold text-[#C0392B] whitespace-nowrap">
+          <XCircle className="w-4 h-4 text-[#E74C3C] shrink-0" />
+          Fuera de Línea
+        </span>
+        {sinceIso && (
+          <>
+            <span className="font-mono text-[11px] font-bold text-[#922B21] tabular-nums whitespace-nowrap">
+              Caído hace {formatElapsedSince(sinceIso, nowMs)}
+            </span>
+            <span className="text-[10px] text-[#6C757D] tabular-nums whitespace-nowrap">
+              Desde {formatSinceCompact(sinceIso)}
+            </span>
+          </>
+        )}
+      </div>
     );
   };
 
@@ -148,16 +173,20 @@ export function ApTable({
     const textColor = ap.status === 'slow' ? 'text-[#D35400]' : 'text-[#1E8449]';
 
     return (
-      <div className="flex flex-col gap-1 min-w-[115px]">
+      <div className="flex flex-col gap-1 min-w-[125px]">
         <div className="flex items-baseline justify-between gap-2">
           <span className={`font-mono text-xs font-bold tabular-nums ${textColor}`}>
             {ap.latencyMs} ms
           </span>
-          {ap.packetLoss !== null && ap.packetLoss > 0 && (
+          {ap.packetLoss !== null && ap.packetLoss > 0 ? (
             <span className="text-[11px] font-semibold text-[#D35400] tabular-nums">
               {ap.packetLoss}% pérd.
             </span>
-          )}
+          ) : ap.jitterMs !== null ? (
+            <span className="text-[10px] font-medium text-[#6C757D] tabular-nums">
+              Jit {ap.jitterMs} ms
+            </span>
+          ) : null}
         </div>
         <div className="w-full h-1.5 bg-[#E9ECEF] rounded-full overflow-hidden">
           <div
@@ -165,6 +194,33 @@ export function ApTable({
             style={{ width: `${Math.max(8, ratio)}%` }}
           />
         </div>
+      </div>
+    );
+  };
+
+  const renderUptime = (ap: AccessPoint) => {
+    const pct = ap.uptimePercent;
+    const outages = ap.outageCount ?? 0;
+    if (pct === null) {
+      return (
+        <div className="flex flex-col">
+          <span className="text-xs font-medium text-[#6C757D]">Sin datos</span>
+          <span className="text-[10px] text-[#ADB5BD]">Esperando LAN</span>
+        </div>
+      );
+    }
+
+    const colorClass =
+      pct >= 99 ? 'text-[#1E8449]' : pct >= 95 ? 'text-[#D35400]' : 'text-[#C0392B]';
+
+    return (
+      <div className="flex flex-col">
+        <span className={`font-mono text-xs font-bold tabular-nums ${colorClass}`}>
+          {pct}%
+        </span>
+        <span className="text-[10px] text-[#6C757D] tabular-nums">
+          {outages} {outages === 1 ? 'caída' : 'caídas'}
+        </span>
       </div>
     );
   };
@@ -198,6 +254,9 @@ export function ApTable({
               </th>
               <th className="py-3 px-3.5 whitespace-nowrap">
                 {renderSortHeader('Velocidad', 'speedMbps')}
+              </th>
+              <th className="py-3 px-3.5 whitespace-nowrap">
+                {renderSortHeader('Uptime', 'uptimePercent')}
               </th>
               <th className="py-3 px-3.5 whitespace-nowrap">
                 {renderSortHeader('Estado', 'status')}
@@ -318,6 +377,25 @@ export function ApTable({
 
               <th className="py-2 px-3.5 font-normal">
                 <select
+                  aria-label="Filtrar por uptime"
+                  value={columnFilters.uptime}
+                  onChange={(e) =>
+                    onColumnFilterChange(
+                      'uptime',
+                      e.target.value as ColumnFilters['uptime'],
+                    )
+                  }
+                  className={filterInputClass}
+                >
+                  <option value="all">Todos</option>
+                  <option value="healthy">≥ 99% óptimo</option>
+                  <option value="degraded">&lt; 99%</option>
+                  <option value="withOutages">Con caídas</option>
+                </select>
+              </th>
+
+              <th className="py-2 px-3.5 font-normal">
+                <select
                   aria-label="Filtrar por estado"
                   value={columnFilters.status}
                   onChange={(e) =>
@@ -352,14 +430,14 @@ export function ApTable({
             {loading ? (
               Array.from({ length: 5 }).map((_, idx) => (
                 <tr key={idx} className="animate-pulse">
-                  <td colSpan={9} className="py-4 px-4">
+                  <td colSpan={10} className="py-4 px-4">
                     <div className="h-4 bg-[#E9ECEF] rounded w-full" />
                   </td>
                 </tr>
               ))
             ) : aps.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-12 px-4 text-center">
+                <td colSpan={10} className="py-12 px-4 text-center">
                   <p className="text-sm font-medium text-[#495057] mb-2">
                     No se encontraron Access Points con los filtros actuales.
                   </p>
@@ -455,6 +533,10 @@ export function ApTable({
                           </span>
                         )}
                       </button>
+                    </td>
+
+                    <td className="py-3 px-3.5 whitespace-nowrap">
+                      {renderUptime(ap)}
                     </td>
 
                     <td className="py-3 px-3.5 whitespace-nowrap">

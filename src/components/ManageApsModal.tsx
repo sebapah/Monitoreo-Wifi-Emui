@@ -11,6 +11,7 @@ interface ManageApsModalProps {
   onUpdateAp: (id: string, input: ApInput) => Promise<void>;
   onDeleteAp: (id: string) => Promise<void>;
   onResetDefaults: () => Promise<void>;
+  onResetStats: () => Promise<void>;
   onUpdateThreshold: (ms: number) => Promise<void>;
 }
 
@@ -31,6 +32,7 @@ export function ManageApsModal({
   onUpdateAp,
   onDeleteAp,
   onResetDefaults,
+  onResetStats,
   onUpdateThreshold,
 }: ManageApsModalProps) {
   const [form, setForm] = useState<ApInput>(EMPTY_FORM);
@@ -272,26 +274,44 @@ export function ManageApsModal({
 
           {/* Listado rápido */}
           <div>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 className="text-xs font-bold uppercase tracking-wide text-[#343A40]">
                 Equipos registrados ({aps.length})
               </h3>
-              <button
-                type="button"
-                onClick={async () => {
-                  setSubmitting(true);
-                  try {
-                    await onResetDefaults();
-                  } finally {
-                    setSubmitting(false);
-                  }
-                }}
-                disabled={submitting}
-                className="inline-flex items-center gap-1 text-xs font-semibold text-[#495057] hover:text-[#1A1A1A] cursor-pointer"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Restaurar lista original EMUI</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setSubmitting(true);
+                    try {
+                      await onResetStats();
+                    } finally {
+                      setSubmitting(false);
+                    }
+                  }}
+                  disabled={submitting}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#495057] hover:text-[#1A1A1A] cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reiniciar Uptime / Caídas</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setSubmitting(true);
+                    try {
+                      await onResetDefaults();
+                    } finally {
+                      setSubmitting(false);
+                    }
+                  }}
+                  disabled={submitting}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#495057] hover:text-[#1A1A1A] cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Restaurar lista original EMUI</span>
+                </button>
+              </div>
             </div>
 
             <div className="border border-[#E9ECEF] rounded-lg divide-y divide-[#E9ECEF] max-h-56 overflow-y-auto">

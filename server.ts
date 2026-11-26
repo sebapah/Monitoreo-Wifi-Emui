@@ -3,6 +3,7 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
+import { alertService } from './server/alertService.ts';
 import { pingMonitor } from './server/pingService.ts';
 import type { AgentPingItem, ApInput } from './src/types/ap.ts';
 
@@ -78,6 +79,51 @@ async function startServer(): Promise<void> {
     }
     const snapshot = pingMonitor.updateSlowThreshold(threshold);
     res.json(snapshot);
+  });
+
+  app.post('/api/monitor/reset-stats', (_req, res) => {
+    const snapshot = pingMonitor.resetUptimeStats();
+    res.json(snapshot);
+  });
+
+  app.get('/api/alerts', (_req, res) => {
+    res.json(alertService.getState());
+  });
+
+  app.patch('/api/alerts/config', (req, res) => {
+    const autoEnabled =
+      typeof req.body?.autoEnabled === 'boolean' ? req.body.autoEnabled : undefined;
+    const rawCooldown = req.body?.cooldownMinutes;
+    const cooldownMinutes =
+      rawCooldown !== undefined ? Number(rawCooldown) : undefined;
+
+    if (
+      cooldownMinutes !== undefined &&
+      (!Number.isFinite(cooldownMinutes) || ![0, 15, 30, 60].includes(cooldownMinutes))
+    ) {
+      res.status(400).json({
+        error: 'El intervalo de repetición debe ser 0, 15, 30 o 60 minutos.',
+      });
+      return;
+    }
+
+    res.json(alertService.updateConfig(autoEnabled, cooldownMinutes));
+  });
+
+  app.post('/api/alerts/test', async (_req, res) => {
+    try {
+      const result = await alertService.sendTestAlert(pingMonitor.getSnapshot());
+      res.status(result.ok ? 200 : 400).json(result);
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        message:
+          error instanceof Error
+            ? error.message
+            : 'No se pudo enviar la alerta de prueba.',
+        state: alertService.getState(),
+      });
+    }
   });
 
   app.post('/api/aps', async (req, res) => {

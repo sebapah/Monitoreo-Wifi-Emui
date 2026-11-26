@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
   CheckCircle2,
   ExternalLink,
@@ -9,7 +10,19 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { AccessPoint } from '../types/ap';
+import { formatElapsedSince, formatSinceCompact } from '../utils/duration';
 import { MerakiModelThumb } from './MerakiModelThumb';
+
+function formatDurationSeconds(sec: number | null): string {
+  if (sec === null || sec <= 0) return 'En curso';
+  if (sec < 60) return `${sec} seg`;
+  const mins = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  if (mins < 60) return remSec > 0 ? `${mins}m ${remSec}s` : `${mins} min`;
+  const hours = Math.floor(mins / 60);
+  const remMin = mins % 60;
+  return `${hours}h ${remMin}m`;
+}
 
 interface ApHistoryModalProps {
   ap: AccessPoint | null;
@@ -36,6 +49,7 @@ export function ApHistoryModal({
   const [upInput, setUpInput] = useState<string>('');
   const [savingSpeed, setSavingSpeed] = useState(false);
   const [speedError, setSpeedError] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(() => {
     if (!ap) return;
@@ -44,7 +58,18 @@ export function ApHistoryModal({
     setSpeedError(null);
   }, [ap]);
 
+  useEffect(() => {
+    if (!ap || ap.status !== 'offline') return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [ap]);
+
   if (!ap) return null;
+
+  const activeSinceIso = ap.activeOutageStartedAt ?? ap.offlineSince ?? ap.lastCheckedAt;
 
   const handleSaveSpeed = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -111,8 +136,32 @@ export function ApHistoryModal({
         </div>
 
         <div className="p-5 overflow-y-auto space-y-5">
+          {ap.status === 'offline' && activeSinceIso && (
+            <div className="rounded-lg border border-[#E74C3C]/40 bg-[#FDEDEC] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <XCircle className="w-5 h-5 text-[#C0392B] shrink-0" />
+                <div>
+                  <p className="text-xs font-extrabold text-[#922B21] uppercase tracking-wide">
+                    Access Point Fuera de Línea
+                  </p>
+                  <p className="text-xs text-[#641E16] tabular-nums">
+                    Caído desde: <strong>{formatSinceCompact(activeSinceIso)}</strong>
+                  </p>
+                </div>
+              </div>
+              <div className="bg-[#C0392B] text-white rounded-md px-3 py-1.5 text-right">
+                <span className="block text-[10px] uppercase tracking-wide text-white/80 font-semibold">
+                  Tiempo caído
+                </span>
+                <span className="font-mono text-base font-extrabold tabular-nums">
+                  {formatElapsedSince(activeSinceIso, nowMs)}
+                </span>
+              </div>
+            </div>
+          )}
+
           {/* Métricas actuales */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             <div className="bg-[#F8F9FA] border border-[#E9ECEF] rounded-lg p-3">
               <span className="text-[11px] font-semibold uppercase tracking-wide text-[#6C757D] block">
                 Latencia Prom.
@@ -120,37 +169,153 @@ export function ApHistoryModal({
               <span className="font-mono text-lg font-bold text-[#1A1A1A] tabular-nums">
                 {ap.latencyMs !== null ? `${ap.latencyMs} ms` : '—'}
               </span>
-            </div>
-
-            <div className="bg-[#F8F9FA] border border-[#E9ECEF] rounded-lg p-3">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-[#6C757D] block">
-                Mín / Máx
-              </span>
-              <span className="font-mono text-lg font-bold text-[#1A1A1A] tabular-nums">
+              <span className="block text-[11px] text-[#6C757D] tabular-nums">
+                Mín/Máx:{' '}
                 {ap.minMs !== null && ap.maxMs !== null
-                  ? `${ap.minMs}/${ap.maxMs}`
+                  ? `${ap.minMs}/${ap.maxMs} ms`
                   : '—'}
               </span>
             </div>
 
             <div className="bg-[#F8F9FA] border border-[#E9ECEF] rounded-lg p-3">
               <span className="text-[11px] font-semibold uppercase tracking-wide text-[#6C757D] block">
-                Jitter
+                Jitter / Pérdida
               </span>
               <span className="font-mono text-lg font-bold text-[#1A1A1A] tabular-nums">
                 {ap.jitterMs !== null ? `${ap.jitterMs} ms` : '—'}
               </span>
-            </div>
-
-            <div className="bg-[#F8F9FA] border border-[#E9ECEF] rounded-lg p-3">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-[#6C757D] block">
-                Pérdida
-              </span>
-              <span className="font-mono text-lg font-bold text-[#1A1A1A] tabular-nums">
+              <span className="block text-[11px] text-[#6C757D] tabular-nums">
+                Pérdida:{' '}
                 {ap.packetLoss !== null ? `${ap.packetLoss}%` : '—'}
               </span>
             </div>
+
+            <div className="bg-[#F8F9FA] border border-[#E9ECEF] rounded-lg p-3 col-span-2 sm:col-span-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-[#6C757D] block">
+                Disponibilidad (Uptime)
+              </span>
+              <span
+                className={`font-mono text-lg font-bold tabular-nums ${
+                  ap.uptimePercent === null
+                    ? 'text-[#6C757D]'
+                    : ap.uptimePercent >= 99
+                      ? 'text-[#1E8449]'
+                      : ap.uptimePercent >= 95
+                        ? 'text-[#D35400]'
+                        : 'text-[#C0392B]'
+                }`}
+              >
+                {ap.uptimePercent !== null ? `${ap.uptimePercent}%` : '—'}
+              </span>
+              <span className="block text-[11px] text-[#6C757D] tabular-nums">
+                {ap.outageCount ?? 0} caídas ({ap.successfulChecks ?? 0}/{ap.totalChecks ?? 0} OK)
+              </span>
+            </div>
           </div>
+
+          {/* Gráfico de tendencia de latencia */}
+          {ap.history.length > 1 && (
+            <div className="bg-white border border-[#DEE2E6] rounded-lg p-4 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <Activity className="w-4 h-4 text-[#2C3E50]" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-[#343A40]">
+                    Tendencia reciente de latencia (últimos {Math.min(40, ap.history.length)} ciclos)
+                  </h3>
+                </div>
+                <span className="text-[11px] text-[#6C757D] tabular-nums">
+                  Umbral: {slowThresholdMs} ms
+                </span>
+              </div>
+
+              <div className="h-20 flex items-end gap-[3px] pt-2 border-b border-[#E9ECEF]">
+                {(() => {
+                  const recent = [...ap.history.slice(0, 40)].reverse();
+                  const maxLat = Math.max(
+                    slowThresholdMs,
+                    ...recent.map((r) => r.latencyMs ?? 0),
+                    20,
+                  );
+                  return recent.map((item, idx) => {
+                    const isOffline = item.status === 'offline' || item.latencyMs === null;
+                    const heightPct = isOffline
+                      ? 100
+                      : Math.max(10, Math.round((item.latencyMs! / maxLat) * 100));
+                    const barBg = isOffline
+                      ? 'bg-[#E74C3C]'
+                      : item.status === 'slow'
+                        ? 'bg-[#E67E22]'
+                        : 'bg-[#27AE60]';
+                    const titleText = `${new Date(item.timestamp).toLocaleTimeString('es-AR')} · ${
+                      isOffline ? 'Fuera de Línea' : `${item.latencyMs} ms`
+                    }`;
+                    return (
+                      <div
+                        key={`${item.timestamp}-${idx}`}
+                        title={titleText}
+                        className="flex-1 h-full flex items-end"
+                      >
+                        <div
+                          className={`w-full rounded-t-xs transition-all ${barBg}`}
+                          style={{ height: `${heightPct}%` }}
+                        />
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-[#6C757D]">
+                <span>Más antiguo</span>
+                <span>Más reciente</span>
+              </div>
+            </div>
+          )}
+
+          {/* Historial de caídas / cortes */}
+          {Array.isArray(ap.outages) && ap.outages.length > 0 && (
+            <div className="bg-white border border-[#DEE2E6] rounded-lg overflow-hidden">
+              <div className="px-4 py-2 bg-[#F8F9FA] border-b border-[#DEE2E6] flex items-center justify-between text-xs font-bold text-[#343A40]">
+                <span>Registro de caídas detectadas</span>
+                <span className="font-mono tabular-nums text-[#C0392B]">
+                  {ap.outageCount} total
+                </span>
+              </div>
+              <div className="divide-y divide-[#E9ECEF] max-h-36 overflow-y-auto">
+                {ap.outages.map((outage, idx) => (
+                  <div
+                    key={`${outage.startedAt}-${idx}`}
+                    className="px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
+                  >
+                    <span className="font-mono text-[#495057] tabular-nums">
+                      {new Date(outage.startedAt).toLocaleString('es-AR', {
+                        day: '2-digit',
+                        month: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                      })}
+                      {outage.endedAt
+                        ? ` → ${new Date(outage.endedAt).toLocaleTimeString('es-AR', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                          })}`
+                        : ' → Actualidad'}
+                    </span>
+                    <span
+                      className={`font-semibold tabular-nums ${
+                        outage.endedAt ? 'text-[#495057]' : 'text-[#C0392B]'
+                      }`}
+                    >
+                      {outage.endedAt
+                        ? `Duración: ${formatDurationSeconds(outage.durationSeconds)}`
+                        : `En curso: ${formatElapsedSince(outage.startedAt, nowMs)}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="bg-[#F8F9FA] border border-[#E9ECEF] rounded-lg px-4 py-3 flex flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-[#495057] space-y-0.5">

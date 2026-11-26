@@ -1,38 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { User } from 'firebase/auth';
 import { ApHistoryModal } from './components/ApHistoryModal';
 import { ApTable } from './components/ApTable';
-import { EmailAlertsModal } from './components/EmailAlertsModal';
+import { FloorSummaryStrip } from './components/FloorSummaryStrip';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
 import { LanAgentModal } from './components/LanAgentModal';
 import { Legend } from './components/Legend';
 import { ManageApsModal } from './components/ManageApsModal';
+import { MessagingAlertsModal } from './components/MessagingAlertsModal';
 import { SummaryCards } from './components/SummaryCards';
 import { Toolbar } from './components/Toolbar';
 import { UpdateBar } from './components/UpdateBar';
-import {
-  buildAlertEmailContent,
-  DEFAULT_ALERT_RECIPIENT,
-  getAlertScheduleStatus,
-  sendGmailAlertEmail,
-} from './services/gmailAlert';
-import {
-  formatFirebaseAuthError,
-  getCachedGmailAccessToken,
-  initGmailAuthListener,
-  invalidateGmailAccessToken,
-  signInWithGmail,
-  signOutGmail,
-} from './services/gmailAuth';
 import type {
   AccessPoint,
   AgentPingItem,
+  AlertMonitorState,
   ApInput,
   ApStatus,
   ColumnFilters,
-  EmailAlertConfig,
-  EmailAlertLogEntry,
   MonitorSnapshot,
   SortColumn,
   SortConfig,
@@ -69,37 +54,25 @@ const INITIAL_COLUMN_FILTERS: ColumnFilters = {
   portId: 'all',
   latency: 'all',
   speed: 'all',
+  uptime: 'all',
   status: 'all',
 };
 
-const ALERT_CONFIG_STORAGE_KEY = 'emui_wifi_alert_config_v1';
-
-const DEFAULT_ALERT_CONFIG: EmailAlertConfig = {
-  recipientEmail: DEFAULT_ALERT_RECIPIENT,
+const EMPTY_ALERT_STATE: AlertMonitorState = {
   autoEnabled: true,
   cooldownMinutes: 30,
+  channels: {
+    whatsappConfigured: false,
+    telegramConfigured: false,
+  },
+  scheduleStatus: {
+    isWithinWindow: false,
+    dayLabel: 'Lunes',
+    timeLabel: '09:00 hs',
+    reason: 'Verificando ventana horaria...',
+  },
+  logs: [],
 };
-
-function loadAlertConfig(): EmailAlertConfig {
-  try {
-    const raw = localStorage.getItem(ALERT_CONFIG_STORAGE_KEY);
-    if (!raw) return DEFAULT_ALERT_CONFIG;
-    const parsed = JSON.parse(raw) as Partial<EmailAlertConfig>;
-    return {
-      recipientEmail:
-        typeof parsed.recipientEmail === 'string' && parsed.recipientEmail.trim()
-          ? parsed.recipientEmail.trim()
-          : DEFAULT_ALERT_RECIPIENT,
-      autoEnabled: typeof parsed.autoEnabled === 'boolean' ? parsed.autoEnabled : true,
-      cooldownMinutes:
-        typeof parsed.cooldownMinutes === 'number' && Number.isFinite(parsed.cooldownMinutes)
-          ? parsed.cooldownMinutes
-          : 30,
-    };
-  } catch {
-    return DEFAULT_ALERT_CONFIG;
-  }
-}
 
 function normalizeModel(model: string): string {
   return model.replace(/\s+/g, ' ').trim().toUpperCase().replace(/^MR(\d+)/, 'MR $1');
@@ -130,20 +103,15 @@ export default function App() {
   const [historyApId, setHistoryApId] = useState<string | null>(null);
   const [manageOpen, setManageOpen] = useState<boolean>(false);
   const [agentModalOpen, setAgentModalOpen] = useState<boolean>(false);
-  const [emailAlertsModalOpen, setEmailAlertsModalOpen] = useState<boolean>(false);
+  const [alertsModalOpen, setAlertsModalOpen] = useState<boolean>(false);
   const [localBridgeConnected, setLocalBridgeConnected] = useState<boolean>(false);
-  const [gmailUser, setGmailUser] = useState<User | null>(null);
-  const [hasActiveToken, setHasActiveToken] = useState<boolean>(() =>
-    Boolean(getCachedGmailAccessToken()),
-  );
-  const [authBusy, setAuthBusy] = useState<boolean>(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [alertConfig, setAlertConfig] = useState<EmailAlertConfig>(() => loadAlertConfig());
-  const [alertLogs, setAlertLogs] = useState<EmailAlertLogEntry[]>([]);
-
+  const [alertState, setAlertState] = useState<AlertMonitorState>(EMPTY_ALERT_STATE);
   const agentTokenRef = useRef<string | null>(null);
-  const lastAlertedAtRef = useRef<Record<string, number>>({});
-  const autoSendInFlightRef = useRef<boolean>(false);
+  const bridgeInFlightRef = useRef<Promise<boolean> | null>(null);
+  const ipsRef = useRef<string[]>([]);
+
+  const isPrivateTargetIp = (ip: string) =>
+    /^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip);
 
   const ensureAgentToken = useCallback(async (): Promise<string | null> => {
     if (agentTokenRef.current) return agentTokenRef.current;
@@ -164,47 +132,58 @@ export default function App() {
   const syncWithLocalBridge = useCallback(
     async (ipsToProbe: string[]): Promise<boolean> => {
       if (ipsToProbe.length === 0) return false;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      try {
-        const res = await fetch(
-          `${LOCAL_BRIDGE_URL}/ping?ips=${encodeURIComponent(ipsToProbe.join(','))}`,
-          { signal: controller.signal, cache: 'no-store' },
-        );
-        clearTimeout(timeout);
-        if (!res.ok) {
-          setLocalBridgeConnected(false);
-          return false;
-        }
-        const payload = (await res.json()) as { ok?: boolean; results?: AgentPingItem[] };
-        if (!payload.ok || !Array.isArray(payload.results)) {
-          setLocalBridgeConnected(false);
-          return false;
-        }
-
-        setLocalBridgeConnected(true);
-        const token = await ensureAgentToken();
-        if (!token) return true;
-
-        const reportRes = await fetch('/api/monitor/agent-report', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-agent-token': token,
-          },
-          body: JSON.stringify({ token, results: payload.results }),
-        });
-        if (reportRes.ok) {
-          const data = (await reportRes.json()) as { snapshot: MonitorSnapshot };
-          setSnapshot(data.snapshot);
-          setErrorBanner(null);
-        }
-        return true;
-      } catch {
-        clearTimeout(timeout);
-        setLocalBridgeConnected(false);
-        return false;
+      if (bridgeInFlightRef.current) {
+        return bridgeInFlightRef.current;
       }
+
+      const run = (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
+        try {
+          const res = await fetch(
+            `${LOCAL_BRIDGE_URL}/ping?ips=${encodeURIComponent(ipsToProbe.join(','))}`,
+            { signal: controller.signal, cache: 'no-store' },
+          );
+          clearTimeout(timeout);
+          if (!res.ok) {
+            setLocalBridgeConnected(false);
+            return false;
+          }
+          const payload = (await res.json()) as { ok?: boolean; results?: AgentPingItem[] };
+          if (!payload.ok || !Array.isArray(payload.results)) {
+            setLocalBridgeConnected(false);
+            return false;
+          }
+
+          setLocalBridgeConnected(true);
+          const token = await ensureAgentToken();
+          if (!token) return true;
+
+          const reportRes = await fetch('/api/monitor/agent-report', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-agent-token': token,
+            },
+            body: JSON.stringify({ token, results: payload.results }),
+          });
+          if (reportRes.ok) {
+            const data = (await reportRes.json()) as { snapshot: MonitorSnapshot };
+            setSnapshot(data.snapshot);
+            setErrorBanner(null);
+          }
+          return true;
+        } catch {
+          clearTimeout(timeout);
+          setLocalBridgeConnected(false);
+          return false;
+        } finally {
+          bridgeInFlightRef.current = null;
+        }
+      })();
+
+      bridgeInFlightRef.current = run;
+      return run;
     },
     [ensureAgentToken],
   );
@@ -244,274 +223,102 @@ export default function App() {
     return () => clearInterval(serverPollId);
   }, [fetchSnapshot, syncWithLocalBridge]);
 
-  useEffect(() => {
-    if (snapshot.aps.length === 0) return;
-    const bridgeInterval = setInterval(() => {
-      void syncWithLocalBridge(snapshot.aps.map((ap) => ap.ip));
-    }, 30000);
-    return () => clearInterval(bridgeInterval);
-  }, [snapshot.aps, syncWithLocalBridge]);
-
-  useEffect(() => {
-    const unsubscribe = initGmailAuthListener((user) => {
-      setGmailUser(user);
-      if (!user) {
-        setHasActiveToken(false);
-      } else {
-        setHasActiveToken(Boolean(getCachedGmailAccessToken()));
-      }
-    });
-    return unsubscribe;
-  }, []);
-
-  const handleAlertConfigChange = useCallback((next: EmailAlertConfig) => {
-    setAlertConfig(next);
-    try {
-      localStorage.setItem(ALERT_CONFIG_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore storage write errors
-    }
-  }, []);
-
-  const appendAlertLog = useCallback((entry: EmailAlertLogEntry) => {
-    setAlertLogs((prev) => [entry, ...prev].slice(0, 50));
-  }, []);
-
-  const handleGmailSignIn = useCallback(async (): Promise<boolean> => {
-    setAuthBusy(true);
-    setAuthError(null);
-    try {
-      const { user } = await signInWithGmail();
-      setGmailUser(user);
-      setHasActiveToken(true);
-      return true;
-    } catch (err) {
-      setAuthError(formatFirebaseAuthError(err));
-      return false;
-    } finally {
-      setAuthBusy(false);
-    }
-  }, []);
-
-  const handleGmailSignOut = useCallback(async (): Promise<void> => {
-    setAuthBusy(true);
-    setAuthError(null);
-    try {
-      await signOutGmail();
-      setGmailUser(null);
-      setHasActiveToken(false);
-    } catch (err) {
-      setAuthError(formatFirebaseAuthError(err));
-    } finally {
-      setAuthBusy(false);
-    }
-  }, []);
-
-  const handleSendTestEmail = useCallback(
-    async (recipientEmail: string): Promise<{ ok: boolean; message: string }> => {
-      const token = getCachedGmailAccessToken();
-      if (!token) {
-        setHasActiveToken(false);
-        return {
-          ok: false,
-          message: 'La sesión de Gmail expiró o no está activa. Volvé a conectar tu cuenta.',
-        };
-      }
-
-      const scheduleStatus = getAlertScheduleStatus();
-      const effectiveSource: 'server' | 'agent' = localBridgeConnected
-        ? 'agent'
-        : snapshot.telemetrySource;
-      const offlineAps = snapshot.aps.filter((ap) => ap.status === 'offline');
-
-      const { subject, htmlBody, apSummary } = buildAlertEmailContent({
-        kind: 'test',
-        recipientEmail,
-        senderEmail: gmailUser?.email,
-        offlineAps,
-        allAps: snapshot.aps,
-        telemetrySource: effectiveSource,
-        scheduleStatus,
-      });
-
-      try {
-        const res = await sendGmailAlertEmail({
-          accessToken: token,
-          recipientEmail,
-          subject,
-          htmlBody,
-        });
-        const msg = `Correo de prueba enviado correctamente a ${recipientEmail} (ID: ${res.id}).`;
-        appendAlertLog({
-          id: `${Date.now()}-test`,
-          timestamp: new Date().toISOString(),
-          kind: 'test',
-          recipient: recipientEmail,
-          subject,
-          apSummary,
-          success: true,
-          message: msg,
-        });
-        return { ok: true, message: msg };
-      } catch (err) {
-        const status =
-          typeof err === 'object' && err !== null && 'status' in err
-            ? (err as { status?: number }).status
-            : undefined;
-        if (status === 401 || status === 403) {
-          invalidateGmailAccessToken();
-          setHasActiveToken(false);
-        }
-        const errMsg =
-          err instanceof Error ? err.message : 'No se pudo enviar el correo de prueba.';
-        appendAlertLog({
-          id: `${Date.now()}-test-err`,
-          timestamp: new Date().toISOString(),
-          kind: 'test',
-          recipient: recipientEmail,
-          subject,
-          apSummary,
-          success: false,
-          message: errMsg,
-        });
-        return { ok: false, message: errMsg };
-      }
-    },
-    [
-      appendAlertLog,
-      gmailUser?.email,
-      localBridgeConnected,
-      snapshot.aps,
-      snapshot.telemetrySource,
-    ],
+  const ipsKey = useMemo(
+    () => snapshot.aps.map((ap) => ap.ip).join(','),
+    [snapshot.aps],
   );
 
-  // Automatic down-alert evaluator: Mon-Fri 09:00-16:00 Buenos Aires, only when real telemetry is active
   useEffect(() => {
-    if (snapshot.aps.length === 0) return;
+    ipsRef.current = snapshot.aps.map((ap) => ap.ip);
+  }, [snapshot.aps]);
 
-    // Reset cooldown when an AP recovers to online or slow
-    for (const ap of snapshot.aps) {
-      if (ap.status === 'online' || ap.status === 'slow') {
-        delete lastAlertedAtRef.current[ap.id];
+  useEffect(() => {
+    if (!ipsKey) return;
+    const bridgeInterval = setInterval(() => {
+      void syncWithLocalBridge(ipsRef.current);
+    }, 30000);
+    return () => clearInterval(bridgeInterval);
+  }, [ipsKey, syncWithLocalBridge]);
+
+  const fetchAlertState = useCallback(async () => {
+    try {
+      const res = await fetch('/api/alerts');
+      if (res.ok) {
+        const data = (await res.json()) as AlertMonitorState;
+        setAlertState(data);
       }
+    } catch {
+      // Ignore background fetch failures
     }
+  }, []);
 
-    const telemetryReachable = localBridgeConnected || !snapshot.privateSubnetUnreachable;
-    if (!telemetryReachable || !alertConfig.autoEnabled || !hasActiveToken) return;
+  useEffect(() => {
+    void fetchAlertState();
+    const timer = setInterval(() => {
+      void fetchAlertState();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [fetchAlertState]);
 
-    const recipient = alertConfig.recipientEmail.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) return;
-
-    const scheduleStatus = getAlertScheduleStatus();
-    if (!scheduleStatus.isWithinWindow) return;
-
-    const token = getCachedGmailAccessToken();
-    if (!token) {
-      setHasActiveToken(false);
-      return;
-    }
-
-    const nowMs = Date.now();
-    const cooldownMs =
-      alertConfig.cooldownMinutes > 0
-        ? alertConfig.cooldownMinutes * 60 * 1000
-        : Number.POSITIVE_INFINITY;
-
-    const apsToAlert = snapshot.aps.filter((ap) => {
-      if (ap.status !== 'offline') return false;
-      const lastSent = lastAlertedAtRef.current[ap.id];
-      if (lastSent === undefined) return true;
-      return nowMs - lastSent >= cooldownMs;
-    });
-
-    if (apsToAlert.length === 0 || autoSendInFlightRef.current) return;
-
-    autoSendInFlightRef.current = true;
-    const effectiveSource: 'server' | 'agent' = localBridgeConnected
-      ? 'agent'
-      : snapshot.telemetrySource;
-
-    const { subject, htmlBody, apSummary } = buildAlertEmailContent({
-      kind: 'auto',
-      recipientEmail: recipient,
-      senderEmail: gmailUser?.email,
-      offlineAps: apsToAlert,
-      allAps: snapshot.aps,
-      telemetrySource: effectiveSource,
-      scheduleStatus,
-    });
-
-    // Stamp before async call to prevent duplicate sends across rapid re-renders
-    for (const ap of apsToAlert) {
-      lastAlertedAtRef.current[ap.id] = nowMs;
-    }
-
-    void sendGmailAlertEmail({
-      accessToken: token,
-      recipientEmail: recipient,
-      subject,
-      htmlBody,
-    })
-      .then((res) => {
-        appendAlertLog({
-          id: `${Date.now()}-auto`,
-          timestamp: new Date().toISOString(),
-          kind: 'auto',
-          recipient,
-          subject,
-          apSummary,
-          success: true,
-          message: `Alarma automática enviada (ID: ${res.id}).`,
-        });
-      })
-      .catch((err) => {
-        // Roll back timestamps on failure so next cycle can retry
-        for (const ap of apsToAlert) {
-          delete lastAlertedAtRef.current[ap.id];
-        }
-        const status =
-          typeof err === 'object' && err !== null && 'status' in err
-            ? (err as { status?: number }).status
-            : undefined;
-        if (status === 401 || status === 403) {
-          invalidateGmailAccessToken();
-          setHasActiveToken(false);
-        }
-        appendAlertLog({
-          id: `${Date.now()}-auto-err`,
-          timestamp: new Date().toISOString(),
-          kind: 'auto',
-          recipient,
-          subject,
-          apSummary,
-          success: false,
-          message:
-            err instanceof Error ? err.message : 'Error al enviar la alarma automática.',
-        });
-      })
-      .finally(() => {
-        autoSendInFlightRef.current = false;
+  const handleUpdateAlertConfig = useCallback(
+    async (autoEnabled: boolean, cooldownMinutes: number) => {
+      const res = await fetch('/api/alerts/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoEnabled, cooldownMinutes }),
       });
-  }, [
-    alertConfig.autoEnabled,
-    alertConfig.cooldownMinutes,
-    alertConfig.recipientEmail,
-    appendAlertLog,
-    gmailUser?.email,
-    hasActiveToken,
-    localBridgeConnected,
-    snapshot.aps,
-    snapshot.privateSubnetUnreachable,
-    snapshot.telemetrySource,
-  ]);
+      if (res.ok) {
+        const data = (await res.json()) as AlertMonitorState;
+        setAlertState(data);
+      }
+    },
+    [],
+  );
+
+  const handleSendTestAlert = useCallback(async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    try {
+      const res = await fetch('/api/alerts/test', { method: 'POST' });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        message?: string;
+        state?: AlertMonitorState;
+      };
+      if (data.state) {
+        setAlertState(data.state);
+      }
+      return {
+        ok: Boolean(res.ok && data.ok),
+        message: data.message ?? 'Error al enviar la alerta de prueba.',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message:
+          err instanceof Error ? err.message : 'No se pudo contactar al servidor de alertas.',
+      };
+    }
+  }, []);
 
   const handlePingAll = async () => {
+    const ips = snapshot.aps.map((ap) => ap.ip);
+    const allPrivate = ips.length > 0 && ips.every(isPrivateTargetIp);
     setSnapshot((prev) => ({ ...prev, isScanning: true }));
     try {
-      const usedBridge = await syncWithLocalBridge(snapshot.aps.map((ap) => ap.ip));
+      const usedBridge = await syncWithLocalBridge(ips);
       if (usedBridge) {
         setSnapshot((prev) => ({ ...prev, isScanning: false }));
+        return;
+      }
+
+      if (snapshot.isCloudHost && allPrivate) {
+        await fetchSnapshot();
+        setSnapshot((prev) => ({ ...prev, isScanning: false }));
+        setErrorBanner(
+          'No se pudo contactar al Agente Red Local (.bat) en esta PC. Se conservaron los últimos datos sin pisarlos con errores de la nube.',
+        );
         return;
       }
 
@@ -534,9 +341,15 @@ export default function App() {
     const targetAp = snapshot.aps.find((ap) => ap.id === id);
     setPingingIds((prev) => ({ ...prev, [id]: true }));
     try {
-      if (targetAp && localBridgeConnected) {
+      if (targetAp && (localBridgeConnected || snapshot.telemetrySource === 'agent' || snapshot.isCloudHost)) {
         const usedBridge = await syncWithLocalBridge([targetAp.ip]);
         if (usedBridge) return;
+        if (snapshot.isCloudHost && isPrivateTargetIp(targetAp.ip)) {
+          setErrorBanner(
+            `No se pudo contactar al Agente Red Local (.bat) para verificar ${targetAp.ip}. Verificá que la ventana del .bat siga abierta.`,
+          );
+          return;
+        }
       }
 
       const res = await fetch(`/api/monitor/ping/${encodeURIComponent(id)}`, {
@@ -595,6 +408,14 @@ export default function App() {
 
   const handleResetDefaults = async () => {
     const res = await fetch('/api/aps/reset', { method: 'POST' });
+    const data = (await res.json()) as MonitorSnapshot;
+    if (res.ok) {
+      setSnapshot(data);
+    }
+  };
+
+  const handleResetStats = async () => {
+    const res = await fetch('/api/monitor/reset-stats', { method: 'POST' });
     const data = (await res.json()) as MonitorSnapshot;
     if (res.ok) {
       setSnapshot(data);
@@ -680,6 +501,7 @@ export default function App() {
       columnFilters.portId !== 'all' ||
       columnFilters.latency !== 'all' ||
       columnFilters.speed !== 'all' ||
+      columnFilters.uptime !== 'all' ||
       columnFilters.status !== 'all'
     );
   }, [searchQuery, columnFilters]);
@@ -727,6 +549,23 @@ export default function App() {
         if (columnFilters.speed === 'measured' && ap.speedMbps === null) return false;
         if (columnFilters.speed === 'unmeasured' && ap.speedMbps !== null) return false;
       }
+      if (columnFilters.uptime !== 'all') {
+        if (
+          columnFilters.uptime === 'healthy' &&
+          (ap.uptimePercent === null || ap.uptimePercent < 99)
+        ) {
+          return false;
+        }
+        if (
+          columnFilters.uptime === 'degraded' &&
+          (ap.uptimePercent === null || ap.uptimePercent >= 99)
+        ) {
+          return false;
+        }
+        if (columnFilters.uptime === 'withOutages' && (ap.outageCount ?? 0) === 0) {
+          return false;
+        }
+      }
       if (columnFilters.status !== 'all' && ap.status !== columnFilters.status) {
         return false;
       }
@@ -769,6 +608,11 @@ export default function App() {
         case 'speedMbps': {
           const valA = a.speedMbps ?? -1;
           const valB = b.speedMbps ?? -1;
+          return (valA - valB) * dir;
+        }
+        case 'uptimePercent': {
+          const valA = a.uptimePercent ?? -1;
+          const valB = b.uptimePercent ?? -1;
           return (valA - valB) * dir;
         }
         case 'status':
@@ -817,16 +661,28 @@ export default function App() {
           privateSubnetUnreachable={
             !localBridgeConnected && snapshot.privateSubnetUnreachable
           }
-          emailAlertsActive={hasActiveToken && alertConfig.autoEnabled}
+          alertsActive={
+            alertState.autoEnabled &&
+            (alertState.channels.whatsappConfigured || alertState.channels.telegramConfigured)
+          }
           onRefresh={handlePingAll}
           onOpenAgentModal={() => setAgentModalOpen(true)}
-          onOpenEmailAlertsModal={() => setEmailAlertsModalOpen(true)}
+          onOpenAlertsModal={() => {
+            void fetchAlertState();
+            setAlertsModalOpen(true);
+          }}
         />
 
         <SummaryCards
           summary={snapshot.summary}
           activeStatusFilter={columnFilters.status}
           onSelectStatus={(status) => handleColumnFilterChange('status', status)}
+        />
+
+        <FloorSummaryStrip
+          aps={snapshot.aps}
+          activeFloor={columnFilters.floor}
+          onSelectFloor={(floor) => handleColumnFilterChange('floor', floor)}
         />
 
         <Toolbar
@@ -882,6 +738,7 @@ export default function App() {
         onUpdateAp={handleUpdateAp}
         onDeleteAp={handleDeleteAp}
         onResetDefaults={handleResetDefaults}
+        onResetStats={handleResetStats}
         onUpdateThreshold={handleUpdateThreshold}
       />
 
@@ -894,22 +751,14 @@ export default function App() {
         onClose={() => setAgentModalOpen(false)}
       />
 
-      <EmailAlertsModal
-        isOpen={emailAlertsModalOpen}
-        gmailUser={gmailUser}
-        hasActiveToken={hasActiveToken}
-        authBusy={authBusy}
-        authError={authError}
-        config={alertConfig}
+      <MessagingAlertsModal
+        isOpen={alertsModalOpen}
+        alertState={alertState}
         aps={snapshot.aps}
-        telemetrySource={localBridgeConnected ? 'agent' : snapshot.telemetrySource}
         privateSubnetUnreachable={!localBridgeConnected && snapshot.privateSubnetUnreachable}
-        logs={alertLogs}
-        onSignIn={handleGmailSignIn}
-        onSignOut={handleGmailSignOut}
-        onConfigChange={handleAlertConfigChange}
-        onSendTestEmail={handleSendTestEmail}
-        onClose={() => setEmailAlertsModalOpen(false)}
+        onUpdateConfig={handleUpdateAlertConfig}
+        onSendTestAlert={handleSendTestAlert}
+        onClose={() => setAlertsModalOpen(false)}
       />
     </div>
   );

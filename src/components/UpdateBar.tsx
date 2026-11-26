@@ -9,10 +9,10 @@ interface UpdateBarProps {
   isScanning: boolean;
   telemetrySource: 'server' | 'agent';
   privateSubnetUnreachable: boolean;
-  emailAlertsActive: boolean;
+  alertsActive: boolean;
   onRefresh: () => void;
   onOpenAgentModal: () => void;
-  onOpenEmailAlertsModal: () => void;
+  onOpenAlertsModal: () => void;
 }
 
 function formatCountdown(targetIso: string): string {
@@ -31,10 +31,10 @@ export function UpdateBar({
   isScanning,
   telemetrySource,
   privateSubnetUnreachable,
-  emailAlertsActive,
+  alertsActive,
   onRefresh,
   onOpenAgentModal,
-  onOpenEmailAlertsModal,
+  onOpenAlertsModal,
 }: UpdateBarProps) {
   const [countdown, setCountdown] = useState<string>(() => formatCountdown(nextCycleAt));
 
@@ -90,15 +90,15 @@ export function UpdateBar({
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={onOpenEmailAlertsModal}
+            onClick={onOpenAlertsModal}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-              emailAlertsActive
+              alertsActive
                 ? 'bg-[#EAFAF1] border-[#27AE60]/40 text-[#1E8449] hover:bg-[#D5F5E3]'
                 : 'bg-[#FFF8DC] border-[#E6B800]/60 text-[#1A1A1A] hover:bg-[#FFD700]/30'
             }`}
           >
             <Bell className="w-3.5 h-3.5" />
-            <span>{emailAlertsActive ? 'Alarmas Email · Activa' : 'Alarmas Email'}</span>
+            <span>{alertsActive ? 'Alertas WhatsApp · Activa' : 'Alertas WhatsApp'}</span>
           </button>
 
           <button

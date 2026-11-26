@@ -27,7 +27,11 @@ export function exportApsToExcelCsv(aps: AccessPoint[], slowThresholdMs: number)
     'Boca / ID',
     'Latencia Promedio (ms)',
     'Mín / Máx (ms)',
+    'Jitter (ms)',
     'Pérdida de Paquetes (%)',
+    'Uptime (%)',
+    'Caídas registradas',
+    'Última caída',
     'Velocidad Bajada Fast.com (Mbps)',
     'Velocidad Subida Fast.com (Mbps)',
     'Estado',
@@ -39,7 +43,17 @@ export function exportApsToExcelCsv(aps: AccessPoint[], slowThresholdMs: number)
     const latency = ap.latencyMs !== null ? String(ap.latencyMs) : 'Sin respuesta';
     const minMax =
       ap.minMs !== null && ap.maxMs !== null ? `${ap.minMs} / ${ap.maxMs}` : '—';
+    const jitter = ap.jitterMs !== null ? String(ap.jitterMs) : '—';
     const loss = ap.packetLoss !== null ? `${ap.packetLoss}%` : '—';
+    const uptime = ap.uptimePercent !== null ? `${ap.uptimePercent}%` : 'Sin datos';
+    const outages = String(ap.outageCount ?? 0);
+    const sinceIso = ap.activeOutageStartedAt ?? ap.offlineSince;
+    const lastOutage =
+      ap.status === 'offline' && sinceIso
+        ? `Caído desde ${new Date(sinceIso).toLocaleString('es-AR')}`
+        : ap.lastOutageAt
+          ? new Date(ap.lastOutageAt).toLocaleString('es-AR')
+          : 'Sin caídas';
     const downSpeed = ap.speedMbps !== null ? String(ap.speedMbps) : 'Sin medir';
     const upSpeed = ap.uploadMbps !== null ? String(ap.uploadMbps) : '—';
     const checkedAt = ap.lastCheckedAt
@@ -54,7 +68,11 @@ export function exportApsToExcelCsv(aps: AccessPoint[], slowThresholdMs: number)
       ap.portId || '—',
       latency,
       minMax,
+      jitter,
       loss,
+      uptime,
+      outages,
+      lastOutage,
       downSpeed,
       upSpeed,
       getStatusLabel(ap.status),
